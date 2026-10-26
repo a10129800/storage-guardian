@@ -1,0 +1,31 @@
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+release/
+coverage/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+electron-debug.log
+*.tsbuildinfo
+
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local editor settings
+.idea/
+.vscode/

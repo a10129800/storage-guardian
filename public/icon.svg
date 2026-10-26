@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6" />
+      <stop offset="50%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#1D4ED8" />
+    </linearGradient>
+    <linearGradient id="discGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+    <linearGradient id="greenSector" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#10B981" />
+    </linearGradient>
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#1E3A8A" flood-opacity="0.35" />
+    </filter>
+  </defs>
+
+  <!-- Outer Shield Badge -->
+  <path d="M 128 16 C 180 16 224 38 224 88 C 224 164 164 220 128 240 C 92 220 32 164 32 88 C 32 38 76 16 128 16 Z" 
+        fill="url(#shieldGrad)" filter="url(#dropShadow)" stroke="#60A5FA" stroke-width="4" />
+
+  <!-- Inner Storage Hard Drive Disk Plate -->
+  <circle cx="128" cy="116" r="62" fill="url(#discGrad)" stroke="#475569" stroke-width="3" />
+
+  <!-- Concentric Track Lines -->
+  <circle cx="128" cy="116" r="48" fill="none" stroke="#334155" stroke-width="2" stroke-dasharray="8 4" />
+  <circle cx="128" cy="116" r="34" fill="none" stroke="#334155" stroke-width="1.5" />
+
+  <!-- Cleaned Free Capacity Pie / Slice (Green) -->
+  <path d="M 128 116 L 128 54 A 62 62 0 0 1 184 140 Z" fill="url(#greenSector)" opacity="0.9" />
+
+  <!-- Center Spindle Hub -->
+  <circle cx="128" cy="116" r="16" fill="#F8FAFC" stroke="#94A3B8" stroke-width="3" />
+  <circle cx="128" cy="116" r="6" fill="#2563EB" />
+
+  <!-- Security Checkmark Badge Overlay -->
+  <circle cx="178" cy="174" r="24" fill="#10B981" stroke="#FFFFFF" stroke-width="3" />
+  <path d="M 168 174 L 175 181 L 190 166" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+</svg>
