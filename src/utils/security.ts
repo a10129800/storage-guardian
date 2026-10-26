@@ -209,6 +209,33 @@ export function validateSafePath(targetPath: string, allowedRoot?: string): { sa
 }
 
 /**
+ * Validates whether a path is valid and safe for READ-ONLY inspection/scanning.
+ * Allows root drives (e.g. C:\, D:\) and standard directories for analysis,
+ * while blocking empty, malformed, control-character, or device-namespace paths.
+ */
+export function validateScanPath(targetPath: string): { safe: boolean; reason?: string } {
+  if (!targetPath || typeof targetPath !== 'string' || targetPath.trim() === '') {
+    return { safe: false, reason: '掃描路徑不得為空' };
+  }
+  if (/[\0]/.test(targetPath)) {
+    return { safe: false, reason: '掃描路徑包含不合法之控制字元' };
+  }
+  const normalized = normalizeSafePath(targetPath);
+  if (!normalized) {
+    return { safe: false, reason: '無法解析的掃描路徑' };
+  }
+  // Disallow Windows reserved raw device namespaces (e.g. \\.\PhysicalDrive, COM1, NUL)
+  if (/^\\\\\.\\/i.test(targetPath.trim())) {
+    return { safe: false, reason: '不允許掃描 Windows 系統底層保留裝置' };
+  }
+  const base = path.basename(normalized).toLowerCase();
+  if (/^(nul|con|prn|aux|com[1-9]|lpt[1-9])(\..+)?$/i.test(base)) {
+    return { safe: false, reason: '不允許掃描 Windows 保留設備名稱' };
+  }
+  return { safe: true };
+}
+
+/**
  * Checks if a candidate developer directory is legitimate to clean (e.g. node_modules, dist)
  * and ensures package.json or source files are not deleted.
  */

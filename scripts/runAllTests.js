@@ -285,6 +285,27 @@ function validateSafePath(targetPath, allowedRoot) {
   return { safe: true };
 }
 
+function validateScanPath(targetPath) {
+  if (!targetPath || typeof targetPath !== 'string' || targetPath.trim() === '') {
+    return { safe: false, reason: '掃描路徑不得為空' };
+  }
+  if (/[\0]/.test(targetPath)) {
+    return { safe: false, reason: '掃描路徑包含不合法之控制字元' };
+  }
+  const normalized = normalizeSafePath(targetPath);
+  if (!normalized) {
+    return { safe: false, reason: '無法解析的掃描路徑' };
+  }
+  if (/^\\\\\.\\/i.test(targetPath.trim())) {
+    return { safe: false, reason: '不允許掃描 Windows 系統底層保留裝置' };
+  }
+  const base = path.basename(normalized).toLowerCase();
+  if (/^(nul|con|prn|aux|com[1-9]|lpt[1-9])(\..+)?$/i.test(base)) {
+    return { safe: false, reason: '不允許掃描 Windows 保留設備名稱' };
+  }
+  return { safe: true };
+}
+
 test('安全邊界: 嚴格封鎖 C:\\Windows 與 System32 破壞操作', () => {
   assert.strictEqual(isDangerousSystemPath('C:\\Windows'), true);
   assert.strictEqual(isDangerousSystemPath('C:\\Windows\\System32'), true);
@@ -320,6 +341,41 @@ test('安全邊界: 允許合法暫存路徑 (如 C:\\Windows\\Temp 或使用者
   assert.strictEqual(isDangerousSystemPath('C:\\Windows\\Temp\\temp.log'), false);
   assert.strictEqual(isDangerousSystemPath('D:\\Projects\\app\\node_modules'), false);
   assert.strictEqual(isDangerousSystemPath('C:\\Users\\Alice\\AppData\\Local\\Temp\\test.tmp'), false);
+});
+
+test('唯讀掃描路徑安全驗證: 允許合法磁碟根目錄 (C:\\, D:\\) 與一般資料夾，阻擋惡意字元與系統裝置', () => {
+  assert.strictEqual(validateScanPath('C:\\').safe, true, '允許唯讀掃描 C 槽根目錄');
+  assert.strictEqual(validateScanPath('D:\\').safe, true, '允許唯讀掃描 D 槽根目錄');
+  assert.strictEqual(validateScanPath('C:\\Windows').safe, true, '允許唯讀分析 Windows 目錄容量');
+  assert.strictEqual(validateScanPath('C:\\Users\\Alice').safe, true, '允許唯讀分析使用者目錄容量');
+  assert.strictEqual(validateScanPath('').safe, false, '拒絕空字串');
+  assert.strictEqual(validateScanPath('   ').safe, false, '拒絕純空白');
+  assert.strictEqual(validateScanPath('C:\\test\0bad').safe, false, '拒絕 Null byte 控制字元');
+  assert.strictEqual(validateScanPath('\\\\.\\PhysicalDrive0').safe, false, '拒絕底層保留裝置');
+  assert.strictEqual(validateScanPath('C:\\nul').safe, false, '拒絕 Windows 保留設備名稱');
+});
+
+test('正式程式碼一致性檢驗: 確認 src/utils/security.ts 正式匯出 validateScanPath 且與 main.ts 呼叫精準綁定', () => {
+  const securityTsPath = path.resolve(process.cwd(), 'src/utils/security.ts');
+  assert.strictEqual(fs.existsSync(securityTsPath), true, 'src/utils/security.ts 必須存在');
+  const secContent = fs.readFileSync(securityTsPath, 'utf8');
+  assert.ok(secContent.includes('export function validateScanPath('), 'src/utils/security.ts 必須正式匯出 validateScanPath');
+  assert.ok(secContent.includes('Disallow Windows reserved raw device namespaces'), 'src/utils/security.ts 必須包含底層保留裝置過濾');
+  assert.ok(secContent.includes('nul|con|prn|aux'), 'src/utils/security.ts 必須包含保留設備名稱過濾');
+
+  const mainTsPath = path.resolve(process.cwd(), 'electron/main.ts');
+  assert.strictEqual(fs.existsSync(mainTsPath), true, 'electron/main.ts 必須存在');
+  const mainContent = fs.readFileSync(mainTsPath, 'utf8');
+  assert.ok(mainContent.includes('validateScanPath(targetPath)'), 'electron/main.ts 必須在目錄與檔案掃描中呼叫 validateScanPath');
+  assert.ok(mainContent.includes('validateScanPath(targetRoot)'), 'electron/main.ts 必須在專案掃描中呼叫 validateScanPath');
+
+  const cleanServicePath = path.resolve(process.cwd(), 'electron/ipc/cleanService.ts');
+  const cleanContent = fs.readFileSync(cleanServicePath, 'utf8');
+  assert.ok(cleanContent.includes('validateSafePath(item.path)'), 'cleanService.ts 必須持續在實際清理中呼叫 validateSafePath');
+
+  const devCleanerPath = path.resolve(process.cwd(), 'electron/ipc/devCleanerService.ts');
+  const devCleanContent = fs.readFileSync(devCleanerPath, 'utf8');
+  assert.ok(devCleanContent.includes('validateSafePath(item.targetDir)'), 'devCleanerService.ts 必須持續在開發者清理中呼叫 validateSafePath');
 });
 
 function validateDevCleanTarget(dirName) {

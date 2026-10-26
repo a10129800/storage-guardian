@@ -10,7 +10,7 @@ import { CleanService } from './ipc/cleanService.ts';
 import { DevCleanerService } from './ipc/devCleanerService.ts';
 import { HistoryService } from './ipc/historyService.ts';
 import { SettingsService } from './ipc/settingsService.ts';
-import { resolveWindowsPath, validateSafePath } from '../src/utils/security.ts';
+import { resolveWindowsPath, validateSafePath, validateScanPath } from '../src/utils/security.ts';
 import os from 'os';
 import { createSandboxFiles } from './ipc/sandboxService.ts';
 
@@ -194,9 +194,9 @@ function setupIpcHandlers() {
       logDiag(`[DIAG-F-ERROR] START_FOLDER_SCAN 失敗: ${errMsg}`);
       throw new Error(errMsg);
     }
-    const safety = validateSafePath(targetPath);
+    const safety = validateScanPath(targetPath);
     if (!safety.safe) {
-      const errMsg = safety.reason || '目標路徑屬於 Windows 核心系統保護區域，禁止掃描';
+      const errMsg = safety.reason || '目標路徑無效，無法進行掃描';
       logDiag(`[DIAG-F-ERROR] 安全防護攔截: ${errMsg}`);
       throw new Error(errMsg);
     }
@@ -227,9 +227,9 @@ function setupIpcHandlers() {
     if (!targetPath || !fs.existsSync(targetPath)) {
       throw new Error(`指定的路徑不存在：${rawPath || '未填寫'}。請確認路徑或點擊「🧪 隔離測試沙箱」。`);
     }
-    const safety = validateSafePath(targetPath);
+    const safety = validateScanPath(targetPath);
     if (!safety.safe) {
-      throw new Error(safety.reason || '目標路徑屬於 Windows 核心系統保護區域，禁止檢索');
+      throw new Error(safety.reason || '目標路徑無效，無法檢索大型檔案');
     }
     return scannerService.findLargeFiles(targetPath, minSizeBytes || 104857600);
   });
@@ -253,9 +253,9 @@ function setupIpcHandlers() {
     if (!targetPath || !fs.existsSync(targetPath)) {
       throw new Error(`指定的路徑不存在：${rawPath || '未填寫'}。請確認路徑或點擊「🧪 隔離測試沙箱」。`);
     }
-    const safety = validateSafePath(targetPath);
+    const safety = validateScanPath(targetPath);
     if (!safety.safe) {
-      throw new Error(safety.reason || '目標路徑屬於 Windows 核心系統保護區域，禁止搜尋重複檔案');
+      throw new Error(safety.reason || '目標路徑無效，無法搜尋重複檔案');
     }
     return duplicateService.findDuplicates(targetPath, (progress) => {
       if (!event.sender.isDestroyed()) {
@@ -291,9 +291,9 @@ function setupIpcHandlers() {
     if (!targetRoot || !fs.existsSync(targetRoot)) {
       throw new Error('指定的專案根目錄不存在');
     }
-    const safety = validateSafePath(targetRoot);
+    const safety = validateScanPath(targetRoot);
     if (!safety.safe) {
-      throw new Error(safety.reason || '目標目錄屬於 Windows 核心系統保護區域');
+      throw new Error(safety.reason || '目標目錄無效，無法掃描專案快取');
     }
     return devCleanerService.scanDevProjects(targetRoot);
   });
