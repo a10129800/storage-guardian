@@ -1,5 +1,5 @@
 # Storage Guardian｜電腦容量守護者
-
+<img src="https://github.com/a10129800/storage-guardian/blob/main/2026-10-26%2012%2002%2015.png?raw=true" width="800" alt="圖片說明">
 > **Windows 本機儲存空間分析、磁碟容量管理及安全清理桌面應用程式**  
 > 具備真實遞迴掃描、兩階段 SHA-256 重複檔案分析、透明安全預覽、使用者二次確認、資源回收筒無損還原、開發者產物清理與本機審計日誌。
 
