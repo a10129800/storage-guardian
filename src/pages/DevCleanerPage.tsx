@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { useAppState } from '../context/AppStateContext.tsx';
 import { api } from '../services/api.ts';
-import { DevProjectCandidate } from '../types/index.ts';
+import { CleanupProgress, CleanupResult, DevProjectCandidate } from '../types/index.ts';
 import { formatBytes, formatDate } from '../utils/formatters.ts';
 import { ConfirmDialog } from '../components/Common/ConfirmDialog.tsx';
+import { CleanupProgressModal } from '../components/Common/CleanupProgressModal.tsx';
 import {
   AlertTriangleIcon,
   CodeIcon,
@@ -20,6 +21,11 @@ export const DevCleanerPage: React.FC = () => {
   const [candidates, setCandidates] = useState<DevProjectCandidate[]>([]);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [isProgressModalOpen, setIsProgressModalOpen] = useState(false);
+  const [cleanupProgress, setCleanupProgress] = useState<CleanupProgress | null>(null);
+  const [lastResult, setLastResult] = useState<CleanupResult | null>(null);
+  const [executeError, setExecuteError] = useState<string | null>(null);
 
   const handleScanProjects = async () => {
     if (!targetScanFolder) return;
@@ -63,19 +69,45 @@ export const DevCleanerPage: React.FC = () => {
   const selectedBytes = selectedCandidates.reduce((s, c) => s + c.size, 0);
 
   const handleExecuteCleanup = async () => {
-    if (selectedCandidates.length === 0) return;
+    if (selectedCandidates.length === 0 || isExecuting) return;
+    setIsConfirmOpen(false);
+    setIsProgressModalOpen(true);
     setIsExecuting(true);
+    setExecuteError(null);
+    setCleanupProgress(null);
+
+    const unsubscribe = api.onCleanupProgress((p) => {
+      setCleanupProgress(p);
+    });
+
     try {
       const result = await api.cleanDevCandidates(selectedCandidates);
+      setLastResult(result);
       setLastCleanupResult(result);
-      setIsConfirmOpen(false);
-      // Re-scan after cleanup
-      await handleScanProjects();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Clean dev candidates error:', err);
+      setExecuteError(err?.message || '專案快取清理作業失敗');
     } finally {
+      unsubscribe();
       setIsExecuting(false);
     }
+  };
+
+  const handleCancelCleanup = async () => {
+    if (isCancelling) return;
+    setIsCancelling(true);
+    try {
+      await api.cancelCleanup();
+    } catch (err) {
+      console.error('Cancel cleanup failed:', err);
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  const handleCloseProgressModal = () => {
+    setIsProgressModalOpen(false);
+    handleScanProjects();
   };
 
   return (
@@ -147,7 +179,7 @@ export const DevCleanerPage: React.FC = () => {
               </span>
               <button
                 className="btn btn-danger"
-                disabled={selectedCandidates.length === 0}
+                disabled={selectedCandidates.length === 0 || isExecuting}
                 onClick={() => setIsConfirmOpen(true)}
               >
                 <TrashIcon size={16} />
@@ -289,6 +321,18 @@ export const DevCleanerPage: React.FC = () => {
         onConfirm={handleExecuteCleanup}
         onCancel={() => setIsConfirmOpen(false)}
         isProcessing={isExecuting}
+      />
+
+      {/* Real-time Cleanup Progress & Cancellation Modal */}
+      <CleanupProgressModal
+        isOpen={isProgressModalOpen}
+        progress={cleanupProgress}
+        result={lastResult}
+        error={executeError}
+        isExecuting={isExecuting}
+        isCancelling={isCancelling}
+        onCancel={handleCancelCleanup}
+        onClose={handleCloseProgressModal}
       />
     </div>
   );

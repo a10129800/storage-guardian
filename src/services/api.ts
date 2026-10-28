@@ -216,6 +216,8 @@ const mockApi: StorageGuardianAPI = {
           movedToRecycleBin: plan.method === 'recycle_bin',
         })),
       }),
+      cancelCleanup: async () => true,
+      onCleanupProgress: () => () => {},
       scanDevProjects: async () => [
         {
           id: 'dev-1',

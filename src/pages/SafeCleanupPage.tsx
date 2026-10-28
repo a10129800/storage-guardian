@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { useAppState } from '../context/AppStateContext.tsx';
 import { api } from '../services/api.ts';
-import { CleanupCandidateItem, CleanupResult } from '../types/index.ts';
+import { CleanupCandidateItem, CleanupProgress, CleanupResult } from '../types/index.ts';
 import { formatBytes } from '../utils/formatters.ts';
 import { ConfirmDialog } from '../components/Common/ConfirmDialog.tsx';
+import { CleanupProgressModal } from '../components/Common/CleanupProgressModal.tsx';
 import {
   AlertTriangleIcon,
   CheckCircleIcon,
@@ -21,6 +22,9 @@ export const SafeCleanupPage: React.FC = () => {
   const [filterRisk, setFilterRisk] = useState<'all' | 'safe' | 'moderate'>('all');
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [isProgressModalOpen, setIsProgressModalOpen] = useState(false);
+  const [cleanupProgress, setCleanupProgress] = useState<CleanupProgress | null>(null);
   const [lastResult, setLastResult] = useState<CleanupResult | null>(null);
   const [executeError, setExecuteError] = useState<string | null>(null);
 
@@ -73,9 +77,17 @@ export const SafeCleanupPage: React.FC = () => {
   const selectedFileCount = selectedCandidates.reduce((sum, c) => sum + c.fileCount, 0);
 
   const handleExecute = async () => {
-    if (selectedCandidates.length === 0) return;
+    if (selectedCandidates.length === 0 || isExecuting) return;
+    setIsConfirmOpen(false);
+    setIsProgressModalOpen(true);
     setIsExecuting(true);
     setExecuteError(null);
+    setCleanupProgress(null);
+
+    const unsubscribe = api.onCleanupProgress((p) => {
+      setCleanupProgress(p);
+    });
+
     try {
       const plan = {
         items: selectedCandidates.map((c) => ({
@@ -92,17 +104,30 @@ export const SafeCleanupPage: React.FC = () => {
       const result = await api.executeCleanup(plan);
       setLastResult(result);
       setLastCleanupResult(result);
-      setIsConfirmOpen(false);
-
-      // Re-scan after cleanup to reflect fresh state
-      await scanCandidates();
     } catch (err: any) {
       console.error('Cleanup execution error:', err);
       setExecuteError(err?.message || '清理作業執行失敗或中斷');
-      setIsConfirmOpen(false);
     } finally {
+      unsubscribe();
       setIsExecuting(false);
     }
+  };
+
+  const handleCancelCleanup = async () => {
+    if (isCancelling) return;
+    setIsCancelling(true);
+    try {
+      await api.cancelCleanup();
+    } catch (err) {
+      console.error('Cancel cleanup failed:', err);
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  const handleCloseProgressModal = () => {
+    setIsProgressModalOpen(false);
+    scanCandidates();
   };
 
   const filteredCandidates = candidates.filter((c) => {
@@ -175,7 +200,7 @@ export const SafeCleanupPage: React.FC = () => {
             </div>
             <button
               className="btn btn-danger"
-              disabled={selectedCandidates.length === 0 || isLoading}
+              disabled={selectedCandidates.length === 0 || isLoading || isExecuting}
               onClick={() => setIsConfirmOpen(true)}
             >
               <TrashIcon size={16} />
@@ -327,6 +352,18 @@ export const SafeCleanupPage: React.FC = () => {
         onConfirm={handleExecute}
         onCancel={() => setIsConfirmOpen(false)}
         isProcessing={isExecuting}
+      />
+
+      {/* Real-time Cleanup Progress & Cancellation Modal */}
+      <CleanupProgressModal
+        isOpen={isProgressModalOpen}
+        progress={cleanupProgress}
+        result={lastResult}
+        error={executeError}
+        isExecuting={isExecuting}
+        isCancelling={isCancelling}
+        onCancel={handleCancelCleanup}
+        onClose={handleCloseProgressModal}
       />
     </div>
   );

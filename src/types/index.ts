@@ -92,6 +92,20 @@ export interface CleanupExecutionPlan {
   method: 'recycle_bin' | 'permanent';
 }
 
+export interface CleanupProgress {
+  totalItems: number;
+  completedItems: number;
+  successfulItems: number;
+  failedItems: number;
+  totalBytes: number;
+  processedBytes: number;
+  currentItem: string;
+  percent: number;
+  elapsedTime: number;
+  estimatedRemainingTime: number | null;
+  status: 'running' | 'completed' | 'cancelled' | 'error';
+}
+
 export interface CleanupResultDetail {
   path: string;
   size: number;
@@ -175,6 +189,8 @@ export interface StorageGuardianAPI {
 
   scanSafeCleanCandidates: () => Promise<CleanupCandidateItem[]>;
   executeCleanup: (plan: CleanupExecutionPlan) => Promise<CleanupResult>;
+  cancelCleanup: () => Promise<boolean>;
+  onCleanupProgress: (callback: (progress: CleanupProgress) => void) => () => void;
   
   scanDevProjects: (targetRoot: string) => Promise<DevProjectCandidate[]>;
   cleanDevCandidates: (items: DevProjectCandidate[]) => Promise<CleanupResult>;

@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { useAppState } from '../context/AppStateContext.tsx';
 import { api } from '../services/api.ts';
-import { FileItem } from '../types/index.ts';
+import { CleanupProgress, CleanupResult, FileItem } from '../types/index.ts';
 import { formatBytes, formatDate } from '../utils/formatters.ts';
 import { ConfirmDialog } from '../components/Common/ConfirmDialog.tsx';
+import { CleanupProgressModal } from '../components/Common/CleanupProgressModal.tsx';
 import {
   AlertTriangleIcon,
   ExternalLinkIcon,
@@ -38,9 +39,16 @@ export const LargeFilesPage: React.FC = () => {
   const [sortBy, setSortBy] = useState<'size' | 'date' | 'name'>('size');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Confirmation state for deleting single/multiple files
+  // Selection & Batch Confirmation state
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [fileToDelete, setFileToDelete] = useState<FileItem | null>(null);
+  const [isBatchConfirmOpen, setIsBatchConfirmOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [isProgressModalOpen, setIsProgressModalOpen] = useState(false);
+  const [cleanupProgress, setCleanupProgress] = useState<CleanupProgress | null>(null);
+  const [lastResult, setLastResult] = useState<CleanupResult | null>(null);
+  const [executeError, setExecuteError] = useState<string | null>(null);
 
   const handleBrowseFolder = async () => {
     setErrorMessage(null);
@@ -58,6 +66,7 @@ export const LargeFilesPage: React.FC = () => {
     }
     setIsLoading(true);
     setErrorMessage(null);
+    setSelectedPaths(new Set());
     try {
       const results = await api.findLargeFiles(targetScanFolder, minSize);
       setFiles(results);
@@ -79,31 +88,97 @@ export const LargeFilesPage: React.FC = () => {
     }
   };
 
-  const handleConfirmDelete = async () => {
-    if (!fileToDelete) return;
+  const toggleSelect = (targetPath: string) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(targetPath)) {
+        next.delete(targetPath);
+      } else {
+        next.add(targetPath);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAll = () => {
+    setSelectedPaths(new Set(filteredFiles.map((f) => f.path)));
+  };
+
+  const handleDeselectAll = () => {
+    setSelectedPaths(new Set());
+  };
+
+  const selectedFiles = files.filter((f) => selectedPaths.has(f.path));
+  const selectedBytes = selectedFiles.reduce((s, f) => s + f.size, 0);
+
+  const executeDeleteBatch = async (itemsToDelete: FileItem[]) => {
+    if (itemsToDelete.length === 0 || isDeleting) return;
     setIsDeleting(true);
+    setExecuteError(null);
+    setCleanupProgress(null);
+    setIsProgressModalOpen(true);
+    setIsBatchConfirmOpen(false);
+    setFileToDelete(null);
+
+    const unsubscribe = api.onCleanupProgress((p) => {
+      setCleanupProgress(p);
+    });
+
     try {
+      const totalEstimatedBytes = itemsToDelete.reduce((s, f) => s + f.size, 0);
       const res = await api.executeCleanup({
-        items: [
-          {
-            id: fileToDelete.path,
-            path: fileToDelete.path,
-            estimatedBytes: fileToDelete.size,
-            toRecycleBin: true,
-          },
-        ],
-        totalFiles: 1,
-        totalEstimatedBytes: fileToDelete.size,
+        items: itemsToDelete.map((f) => ({
+          id: f.path,
+          path: f.path,
+          estimatedBytes: f.size,
+          toRecycleBin: true,
+        })),
+        totalFiles: itemsToDelete.length,
+        totalEstimatedBytes,
         method: 'recycle_bin',
       });
+      setLastResult(res);
       setLastCleanupResult(res);
-      setFiles((prev) => prev.filter((f) => f.path !== fileToDelete.path));
-      setFileToDelete(null);
-    } catch (err) {
+
+      const successPaths = new Set(res.details.filter((d) => d.status === 'success').map((d) => d.path));
+      setFiles((prev) => prev.filter((f) => !successPaths.has(f.path)));
+      setSelectedPaths((prev) => {
+        const next = new Set(prev);
+        successPaths.forEach((p) => next.delete(p));
+        return next;
+      });
+    } catch (err: any) {
       console.error('Delete failed:', err);
+      setExecuteError(err?.message || '大型檔案清理作業執行失敗');
     } finally {
+      unsubscribe();
       setIsDeleting(false);
     }
+  };
+
+  const handleConfirmSingleDelete = async () => {
+    if (!fileToDelete) return;
+    await executeDeleteBatch([fileToDelete]);
+  };
+
+  const handleConfirmBatchDelete = async () => {
+    await executeDeleteBatch(selectedFiles);
+  };
+
+  const handleCancelCleanup = async () => {
+    if (isCancelling) return;
+    setIsCancelling(true);
+    try {
+      await api.cancelCleanup();
+    } catch (err) {
+      console.error('Cancel cleanup failed:', err);
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  const handleCloseProgressModal = () => {
+    setIsProgressModalOpen(false);
   };
 
   const filteredFiles = files
@@ -278,10 +353,55 @@ export const LargeFilesPage: React.FC = () => {
       <div className="card">
         <div className="card-header">
           <div className="card-title">搜尋結果清單 ({filteredFiles.length} 個大型檔案)</div>
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-            合計空間：{formatBytes(filteredFiles.reduce((s, f) => s + f.size, 0))}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            {filteredFiles.length > 0 && (
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={selectedPaths.size === filteredFiles.length ? handleDeselectAll : handleSelectAll}
+                disabled={isDeleting}
+              >
+                {selectedPaths.size === filteredFiles.length ? '取消全選' : '全選所有檔案'}
+              </button>
+            )}
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              合計空間：{formatBytes(filteredFiles.reduce((s, f) => s + f.size, 0))}
+            </span>
+          </div>
         </div>
+
+        {/* Batch Selection Banner */}
+        {selectedFiles.length > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 16px',
+              backgroundColor: 'var(--primary-light)',
+              border: '1px solid var(--primary-border)',
+              borderRadius: 'var(--radius-md)',
+              marginBottom: '16px',
+            }}
+          >
+            <div style={{ fontSize: '0.875rem', color: 'var(--text-main)' }}>
+              已選取 <strong>{selectedFiles.length}</strong> 個大型檔案 (預估釋放{' '}
+              <strong style={{ color: 'var(--primary)' }}>{formatBytes(selectedBytes)}</strong>)
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button className="btn btn-secondary btn-sm" onClick={handleDeselectAll} disabled={isDeleting}>
+                取消選取
+              </button>
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={() => setIsBatchConfirmOpen(true)}
+                disabled={isDeleting}
+              >
+                <TrashIcon size={14} />
+                批次回收清理 ({selectedFiles.length})
+              </button>
+            </div>
+          </div>
+        )}
 
         {filteredFiles.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-dim)' }}>
@@ -292,6 +412,14 @@ export const LargeFilesPage: React.FC = () => {
             <table>
               <thead>
                 <tr>
+                  <th style={{ width: '40px', textAlign: 'center' }}>
+                    <input
+                      type="checkbox"
+                      checked={filteredFiles.length > 0 && selectedPaths.size === filteredFiles.length}
+                      onChange={(e) => (e.target.checked ? handleSelectAll() : handleDeselectAll())}
+                      style={{ cursor: 'pointer' }}
+                    />
+                  </th>
                   <th>檔案名稱</th>
                   <th>類型</th>
                   <th>容量大小</th>
@@ -300,63 +428,75 @@ export const LargeFilesPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {filteredFiles.map((file) => (
-                  <tr key={file.path}>
-                    <td>
-                      <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>{file.name}</div>
-                      <div
-                        style={{
-                          fontSize: '0.72rem',
-                          color: 'var(--text-dim)',
-                          maxWidth: '380px',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {file.path}
-                      </div>
-                    </td>
-                    <td>
-                      <span className="badge badge-safe">
-                        {file.extension.toUpperCase() || 'FILE'}
-                      </span>
-                    </td>
-                    <td style={{ fontWeight: 700, color: 'var(--primary)' }}>
-                      {formatBytes(file.size)}
-                    </td>
-                    <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                      {formatDate(file.modifiedAt)}
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          onClick={() => api.openPathInExplorer(file.path)}
-                          title="在檔案總管中顯示"
+                {filteredFiles.map((file) => {
+                  const isSelected = selectedPaths.has(file.path);
+                  return (
+                    <tr key={file.path} style={{ backgroundColor: isSelected ? 'var(--primary-light)' : undefined }}>
+                      <td style={{ textAlign: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelect(file.path)}
+                          style={{ cursor: 'pointer' }}
+                        />
+                      </td>
+                      <td>
+                        <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>{file.name}</div>
+                        <div
+                          style={{
+                            fontSize: '0.72rem',
+                            color: 'var(--text-dim)',
+                            maxWidth: '380px',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
                         >
-                          <ExternalLinkIcon size={14} />
-                          檔案總管
-                        </button>
-                        <button
-                          className="btn btn-danger btn-sm"
-                          onClick={() => setFileToDelete(file)}
-                          title="移至資源回收筒"
-                        >
-                          <TrashIcon size={14} />
-                          回收清理
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          {file.path}
+                        </div>
+                      </td>
+                      <td>
+                        <span className="badge badge-safe">
+                          {file.extension.toUpperCase() || 'FILE'}
+                        </span>
+                      </td>
+                      <td style={{ fontWeight: 700, color: 'var(--primary)' }}>
+                        {formatBytes(file.size)}
+                      </td>
+                      <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        {formatDate(file.modifiedAt)}
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => api.openPathInExplorer(file.path)}
+                            title="在檔案總管中顯示"
+                          >
+                            <ExternalLinkIcon size={14} />
+                            檔案總管
+                          </button>
+                          <button
+                            className="btn btn-danger btn-sm"
+                            onClick={() => setFileToDelete(file)}
+                            title="移至資源回收筒"
+                            disabled={isDeleting}
+                          >
+                            <TrashIcon size={14} />
+                            回收清理
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </div>
 
-      {/* Safe Confirmation Dialog */}
+      {/* Safe Confirmation Dialog for Single File */}
       <ConfirmDialog
         isOpen={!!fileToDelete}
         title="大型檔案回收確認"
@@ -365,9 +505,35 @@ export const LargeFilesPage: React.FC = () => {
         method="移至 Windows 資源回收筒"
         impactWarning={`目標檔案：${fileToDelete?.name}。請確認此檔案非系統相依元件或正在運行的程式資料庫。移至回收筒後如需復原可至 Windows 資源回收筒還原。`}
         confirmLabel="確認移至回收筒"
-        onConfirm={handleConfirmDelete}
+        onConfirm={handleConfirmSingleDelete}
         onCancel={() => setFileToDelete(null)}
         isProcessing={isDeleting}
+      />
+
+      {/* Safe Confirmation Dialog for Batch Files */}
+      <ConfirmDialog
+        isOpen={isBatchConfirmOpen}
+        title="批次大型檔案回收確認"
+        itemCount={selectedFiles.length}
+        totalBytes={selectedBytes}
+        method="移至 Windows 資源回收筒 (可由回收筒還原)"
+        impactWarning={`即將批次處理已勾選之 ${selectedFiles.length} 個大型檔案。執行前系統將逐一校驗路徑安全性與存在狀態。`}
+        confirmLabel={`確認批次清理 (${selectedFiles.length} 個檔案)`}
+        onConfirm={handleConfirmBatchDelete}
+        onCancel={() => setIsBatchConfirmOpen(false)}
+        isProcessing={isDeleting}
+      />
+
+      {/* Real-time Cleanup Progress & Cancellation Modal */}
+      <CleanupProgressModal
+        isOpen={isProgressModalOpen}
+        progress={cleanupProgress}
+        result={lastResult}
+        error={executeError}
+        isExecuting={isDeleting}
+        isCancelling={isCancelling}
+        onCancel={handleCancelCleanup}
+        onClose={handleCloseProgressModal}
       />
     </div>
   );

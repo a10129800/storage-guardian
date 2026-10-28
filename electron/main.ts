@@ -126,6 +126,8 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
+    cleanService.cancel();
+    devCleanerService.cancel();
     mainWindow = null;
   });
 }
@@ -274,13 +276,24 @@ function setupIpcHandlers() {
     return cleanService.scanSafeCleanCandidates();
   });
 
-  ipcMain.handle(IPC_CHANNELS.EXECUTE_CLEANUP, async (_event, plan) => {
+  ipcMain.handle(IPC_CHANNELS.CANCEL_CLEANUP, async () => {
+    logDiag('[DIAG-D] 主程序收到 CANCEL_CLEANUP 請求，正在通知清理服務中斷後續任務...');
+    cleanService.cancel();
+    devCleanerService.cancel();
+    return true;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXECUTE_CLEANUP, async (event, plan) => {
     logDiag(`[DIAG-D] 主程序收到 EXECUTE_CLEANUP 請求, itemsCount=${plan?.items?.length}, method=${plan?.method}`);
     if (!plan || !Array.isArray(plan.items) || plan.items.length === 0) {
       logDiag('[DIAG-F-ERROR] EXECUTE_CLEANUP 失敗：未提供有效的清理執行計畫');
       throw new Error('未提供有效的清理執行計畫');
     }
-    const result = await cleanService.executeCleanup(plan);
+    const result = await cleanService.executeCleanup(plan, (progress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send(IPC_CHANNELS.CLEANUP_PROGRESS, progress);
+      }
+    });
     logDiag(`[DIAG-E] EXECUTE_CLEANUP 完成：成功=${result.successCount}, 略過=${result.skippedCount}, 失敗=${result.failCount}, 實際釋放=${result.actualFreedBytes} Bytes`);
     await historyService.appendRecord(result, plan.totalEstimatedBytes);
     return result;
@@ -298,11 +311,15 @@ function setupIpcHandlers() {
     return devCleanerService.scanDevProjects(targetRoot);
   });
 
-  ipcMain.handle(IPC_CHANNELS.CLEAN_DEV_CANDIDATES, async (_event, items) => {
+  ipcMain.handle(IPC_CHANNELS.CLEAN_DEV_CANDIDATES, async (event, items) => {
     if (!Array.isArray(items) || items.length === 0) {
       throw new Error('未提供待清理的專案產物');
     }
-    const result = await devCleanerService.cleanCandidates(items);
+    const result = await devCleanerService.cleanCandidates(items, (progress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send(IPC_CHANNELS.CLEANUP_PROGRESS, progress);
+      }
+    });
     await historyService.appendRecord(result);
     return result;
   });

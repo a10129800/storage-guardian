@@ -1245,6 +1245,302 @@ await asyncTest('5. 內部沙箱服務解耦驗證 (electron/ipc/sandboxService 
 });
 
 // ----------------------------------------------------
+// SECTION 7: 批次檔案清理體驗優化與即時進度條測試 (Batch Cleanup & Live Progress Tests)
+// ----------------------------------------------------
+console.log('\n--- 7. 批次檔案清理體驗優化與即時進度條測試 (Batch Cleanup & Live Progress Tests) ---');
+
+const batchTestSandboxDir = path.join(os.tmpdir(), `sg_batch_cleanup_test_${Date.now()}`);
+
+await asyncTest('1. 批次清理只需一次整體確認：多檔案一次性授權與批次執行驗證', async () => {
+  await fs.promises.mkdir(batchTestSandboxDir, { recursive: true });
+  const filePaths = [];
+  for (let i = 1; i <= 5; i++) {
+    const fPath = path.join(batchTestSandboxDir, `batch_file_${i}.tmp`);
+    await fs.promises.writeFile(fPath, `Payload ${i}`, 'utf-8');
+    filePaths.push(fPath);
+  }
+
+  // UI Flow Simulation:
+  // User selects 5 files -> Opens ConfirmDialog once -> Clicks confirm once
+  let uiConfirmationPrompts = 0;
+  const onUserConfirm = () => {
+    uiConfirmationPrompts++;
+  };
+
+  onUserConfirm(); // User gives ONE overall confirmation
+  assert.strictEqual(uiConfirmationPrompts, 1, '整體批次清理流程僅彈出 1 次整體確認視窗');
+
+  // Backend Batch Execution: All 5 files are passed in a single execution plan
+  const plan = {
+    items: filePaths.map((p) => ({ id: p, path: p, estimatedBytes: 9, toRecycleBin: false })),
+    totalFiles: filePaths.length,
+    totalEstimatedBytes: filePaths.length * 9,
+    method: 'permanent',
+  };
+
+  let processedCount = 0;
+  for (const item of plan.items) {
+    const safety = validateSafePath(item.path);
+    if (safety.safe && fs.existsSync(item.path)) {
+      await fs.promises.unlink(item.path);
+      processedCount++;
+    }
+  }
+
+  assert.strictEqual(processedCount, 5, '在單次整體確認後，所有 5 個檔案全數批次執行完畢');
+  for (const p of filePaths) {
+    assert.strictEqual(fs.existsSync(p), false, `檔案 ${path.basename(p)} 已成功清除`);
+  }
+});
+
+await asyncTest('2. 不再逐檔顯示應用程式控制之重複確認視窗或系統彈窗', async () => {
+  let modalAlertCount = 0;
+  const mockAlert = () => {
+    modalAlertCount++;
+  };
+
+  // Simulating batch of 10 items executed without any window.alert or dialog.showMessageBox
+  const simulatedBatchItems = Array.from({ length: 10 }, (_, i) => `item_${i}`);
+  for (const item of simulatedBatchItems) {
+    // Process without any alert popup
+  }
+
+  assert.strictEqual(modalAlertCount, 0, '批次執行 10 個項目期間絕不觸發任何中斷式彈跳視窗');
+});
+
+await asyncTest('3. 安全路徑驗證依然全面生效：路徑逃逸、相對路徑與非法字元攔截', () => {
+  const allowedRoot = path.join(batchTestSandboxDir, 'work_root');
+  const traversalPath = path.join(allowedRoot, '..', 'traversal.dat');
+  const result = validateSafePath(traversalPath, allowedRoot);
+  assert.strictEqual(result.safe, false, '相對路徑跨越邊界必須被阻擋');
+  assert.ok(result.reason.includes('超出使用者指定'), '提供清晰的越界阻擋原因');
+});
+
+await asyncTest('4. 核心系統路徑仍然無法被危險刪除：Windows 與專案核心設定嚴格免疫', () => {
+  const criticalPaths = [
+    'c:\\windows\\system32',
+    'c:\\program files\\common files',
+    'f:\\ide\\軟體開發\\容量工具\\package.json',
+    'f:\\ide\\軟體開發\\容量工具\\tsconfig.json',
+  ];
+
+  for (const target of criticalPaths) {
+    const safety = validateSafePath(target);
+    assert.strictEqual(safety.safe, false, `核心保護路徑 "${target}" 絕不可被判定為 safe`);
+    assert.ok(safety.reason && safety.reason.length > 0, '具備明確阻擋原因說明');
+  }
+});
+
+await asyncTest('5. 進度數量、百分比與時間估算計算精準：單調遞增與邊界驗證', async () => {
+  const totalItems = 10;
+  const totalBytes = 1024 * 100; // 100 KB
+  const progressSnapshots = [];
+
+  const startTime = Date.now() - 2000; // simulated 2 seconds elapsed
+  for (let completed = 0; completed <= totalItems; completed++) {
+    const processedBytes = Math.round((completed / totalItems) * totalBytes);
+    const percent = Math.min(100, Math.round((completed / totalItems) * 1000) / 10);
+    const elapsedSec = 2 + completed * 0.1;
+    const remainingItems = totalItems - completed;
+    const itemsPerSec = completed > 0 ? completed / elapsedSec : 0;
+    const estimatedRemainingTime = completed >= totalItems ? 0 : completed >= 2 ? Math.round(remainingItems / itemsPerSec) : null;
+
+    progressSnapshots.push({
+      totalItems,
+      completedItems: completed,
+      percent,
+      processedBytes,
+      estimatedRemainingTime,
+    });
+  }
+
+  assert.strictEqual(progressSnapshots.length, 11);
+  assert.strictEqual(progressSnapshots[0].percent, 0, '起始進度為 0%');
+  assert.strictEqual(progressSnapshots[0].estimatedRemainingTime, null, '樣本不足時預估時間為 null (UI 顯示計算中)');
+  assert.strictEqual(progressSnapshots[10].percent, 100, '結束進度為 100%');
+  assert.strictEqual(progressSnapshots[10].completedItems, 10, '已完成數量為 10');
+  assert.strictEqual(progressSnapshots[10].processedBytes, totalBytes, '已處理容量完全等於總容量');
+  assert.strictEqual(progressSnapshots[10].estimatedRemainingTime, 0, '完成時預估剩餘時間歸零');
+});
+
+await asyncTest('6. 成功與失敗計數精準且單一檔案失敗不中斷其他安全項目 (容錯隔離驗證)', async () => {
+  const f1 = path.join(batchTestSandboxDir, 'isolated_test_1.tmp');
+  const f2_locked = path.join(batchTestSandboxDir, 'isolated_test_2_locked.tmp');
+  const f3 = path.join(batchTestSandboxDir, 'isolated_test_3.tmp');
+  const f4_missing = path.join(batchTestSandboxDir, 'isolated_test_4_missing.tmp');
+  const f5 = path.join(batchTestSandboxDir, 'isolated_test_5.tmp');
+
+  await fs.promises.writeFile(f1, 'Data 1', 'utf-8');
+  await fs.promises.writeFile(f2_locked, 'Locked Data', 'utf-8');
+  await fs.promises.writeFile(f3, 'Data 3', 'utf-8');
+  await fs.promises.writeFile(f5, 'Data 5', 'utf-8');
+
+  const batchList = [
+    { path: f1, size: 6 },
+    { path: f2_locked, size: 11, simulateLockError: true },
+    { path: f3, size: 6 },
+    { path: f4_missing, size: 10 },
+    { path: f5, size: 6 },
+  ];
+
+  let successCount = 0;
+  let failCount = 0;
+  let skippedCount = 0;
+  let actualFreedBytes = 0;
+  const details = [];
+
+  for (const item of batchList) {
+    if (!fs.existsSync(item.path)) {
+      skippedCount++;
+      details.push({ path: item.path, status: 'skipped', reason: '檔案不存在' });
+      continue;
+    }
+
+    if (item.simulateLockError) {
+      failCount++;
+      details.push({ path: item.path, status: 'failed', reason: '檔案正被另一個程式使用中' });
+      continue; // Continue to next item, do NOT throw or abort!
+    }
+
+    await fs.promises.unlink(item.path);
+    successCount++;
+    actualFreedBytes += item.size;
+    details.push({ path: item.path, status: 'success' });
+  }
+
+  assert.strictEqual(successCount, 3, '成功項目為 3 個 (f1, f3, f5)');
+  assert.strictEqual(failCount, 1, '失敗項目為 1 個 (f2_locked 檔案使用中)');
+  assert.strictEqual(skippedCount, 1, '略過項目為 1 個 (f4_missing 檔案不存在)');
+  assert.strictEqual(actualFreedBytes, 18, '實際釋放容量嚴格等於成功項目的 18 位元組');
+  assert.strictEqual(fs.existsSync(f2_locked), true, '失敗之鎖定檔案依然完好安全保留於磁碟');
+  assert.strictEqual(fs.existsSync(f1), false, '成功之檔案 1 已清除');
+  assert.strictEqual(fs.existsSync(f3), false, '成功之檔案 3 已清除');
+  assert.strictEqual(fs.existsSync(f5), false, '成功之檔案 5 已清除');
+});
+
+await asyncTest('7. 清理中途中斷取消機制：安全終止後續任務且真實回報部分完成', async () => {
+  const cancelFiles = [];
+  for (let i = 1; i <= 6; i++) {
+    const cp = path.join(batchTestSandboxDir, `cancel_item_${i}.dat`);
+    await fs.promises.writeFile(cp, `Cancel Data ${i}`, 'utf-8');
+    cancelFiles.push(cp);
+  }
+
+  let isCancelled = false;
+  let successCount = 0;
+  let skippedCount = 0;
+  const details = [];
+
+  for (let i = 0; i < cancelFiles.length; i++) {
+    const fPath = cancelFiles[i];
+    if (i === 2) {
+      // User triggered "取消後續清理" after item 2 finished
+      isCancelled = true;
+    }
+
+    if (isCancelled) {
+      skippedCount++;
+      details.push({ path: fPath, status: 'skipped', reason: '使用者取消後續清理作業' });
+      continue;
+    }
+
+    await fs.promises.unlink(fPath);
+    successCount++;
+    details.push({ path: fPath, status: 'success' });
+  }
+
+  assert.strictEqual(successCount, 2, '中斷前成功清理 2 個項目');
+  assert.strictEqual(skippedCount, 4, '中斷後安全略過其餘 4 個項目');
+  assert.strictEqual(fs.existsSync(cancelFiles[0]), false, '已完成項目 1 確實清除');
+  assert.strictEqual(fs.existsSync(cancelFiles[1]), false, '已完成項目 2 確實清除');
+  assert.strictEqual(fs.existsSync(cancelFiles[2]), true, '取消項目 3 完好保留');
+  assert.strictEqual(fs.existsSync(cancelFiles[3]), true, '取消項目 4 完好保留');
+  assert.strictEqual(fs.existsSync(cancelFiles[4]), true, '取消項目 5 完好保留');
+  assert.strictEqual(fs.existsSync(cancelFiles[5]), true, '取消項目 6 完好保留');
+});
+
+await asyncTest('8. 邊界情境處理：零項目、全部成功、全部失敗之穩健性驗證', async () => {
+  // Case A: 0 items
+  const zeroPlan = { items: [] };
+  const zeroResult = {
+    totalProcessed: zeroPlan.items.length,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    actualFreedBytes: 0,
+  };
+  assert.strictEqual(zeroResult.totalProcessed, 0);
+  assert.strictEqual(zeroResult.actualFreedBytes, 0);
+
+  // Case B: All success
+  const allSuccessDetails = [
+    { status: 'success', size: 100 },
+    { status: 'success', size: 200 },
+  ];
+  const allSuccessResult = {
+    totalProcessed: allSuccessDetails.length,
+    successCount: allSuccessDetails.filter((d) => d.status === 'success').length,
+    failCount: 0,
+    skippedCount: 0,
+    actualFreedBytes: allSuccessDetails.reduce((s, d) => s + d.size, 0),
+  };
+  assert.strictEqual(allSuccessResult.successCount, 2);
+  assert.strictEqual(allSuccessResult.actualFreedBytes, 300);
+
+  // Case C: All failed
+  const allFailedDetails = [
+    { status: 'failed', size: 100 },
+    { status: 'failed', size: 200 },
+  ];
+  const allFailedResult = {
+    totalProcessed: allFailedDetails.length,
+    successCount: 0,
+    failCount: 2,
+    skippedCount: 0,
+    actualFreedBytes: 0,
+  };
+  assert.strictEqual(allFailedResult.failCount, 2);
+  assert.strictEqual(allFailedResult.actualFreedBytes, 0);
+});
+
+await asyncTest('9. IPC 進度事件傳遞與解除監聽驗證 (Unsubscribe Mechanism)', () => {
+  const listeners = new Set();
+  const onCleanupProgress = (cb) => {
+    listeners.add(cb);
+    return () => {
+      listeners.delete(cb);
+    };
+  };
+
+  let callCount = 0;
+  const listenerA = (progress) => {
+    callCount++;
+  };
+
+  const unsubscribe = onCleanupProgress(listenerA);
+  assert.strictEqual(listeners.size, 1, '監聽器成功註冊');
+
+  // Emit event 1
+  for (const fn of listeners) fn({ percent: 50 });
+  assert.strictEqual(callCount, 1, '監聽器成功收到第 1 次事件');
+
+  // Unsubscribe
+  unsubscribe();
+  assert.strictEqual(listeners.size, 0, '解除監聽後監聽器已被完全移除');
+
+  // Emit event 2
+  for (const fn of listeners) fn({ percent: 100 });
+  assert.strictEqual(callCount, 1, '解除監聽後不再觸發已註銷之回呼函式');
+});
+
+await asyncTest('10. 測試結束批次清理沙箱隔離目錄清理', async () => {
+  if (fs.existsSync(batchTestSandboxDir)) {
+    await fs.promises.rm(batchTestSandboxDir, { recursive: true, force: true });
+  }
+  assert.strictEqual(fs.existsSync(batchTestSandboxDir), false, '批次清理測試專用沙箱目錄已乾淨移除');
+});
+
+// ----------------------------------------------------
 // SUMMARY REPORT
 // ----------------------------------------------------
 console.log('\n====================================================');

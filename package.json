@@ -1,6 +1,6 @@
 {
   "name": "storage-guardian",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Storage Guardian - 電腦容量守護者 (Windows 磁碟分析與安全清理工具)",
   "main": "dist-electron/main.js",
   "type": "module",

@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import {
   CleanupCandidateItem,
   CleanupExecutionPlan,
+  CleanupProgress,
   CleanupResult,
   CleanupResultDetail,
 } from '../../src/types/index.ts';
@@ -12,6 +13,12 @@ import { isDangerousSystemPath, validateSafePath } from '../../src/utils/securit
 import { moveToRecycleBin } from './recycleBin.ts';
 
 export class CleanService {
+  private isCancelled = false;
+
+  cancel(): void {
+    this.isCancelled = true;
+  }
+
   private computeQuickSha256(filePath: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const hash = crypto.createHash('sha256');
@@ -136,12 +143,46 @@ export class CleanService {
    *    clean ONLY the contents or specific pattern files, NEVER delete the root folder itself!
    * 4. Record all successes, failures, and skipped items.
    */
-  async executeCleanup(plan: CleanupExecutionPlan): Promise<CleanupResult> {
+  async executeCleanup(
+    plan: CleanupExecutionPlan,
+    onProgress?: (progress: CleanupProgress) => void
+  ): Promise<CleanupResult> {
+    this.isCancelled = false;
     const details: CleanupResultDetail[] = [];
     let successCount = 0;
     let failCount = 0;
     let skippedCount = 0;
     let actualFreedBytes = 0;
+    let processedBytes = 0;
+
+    if (!plan || !Array.isArray(plan.items) || plan.items.length === 0) {
+      if (onProgress) {
+        onProgress({
+          totalItems: 0,
+          completedItems: 0,
+          successfulItems: 0,
+          failedItems: 0,
+          totalBytes: 0,
+          processedBytes: 0,
+          currentItem: '',
+          percent: 100,
+          elapsedTime: 0,
+          estimatedRemainingTime: 0,
+          status: 'completed',
+        });
+      }
+      return {
+        id: `clean-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        operationType: 'safe_cleanup',
+        totalProcessed: 0,
+        successCount: 0,
+        failCount: 0,
+        skippedCount: 0,
+        actualFreedBytes: 0,
+        details: [],
+      };
+    }
 
     // 0. Backend Duplicate Group Defense:
     // If incoming plan contains multiple duplicate copies of the exact same content,
@@ -172,8 +213,139 @@ export class CleanService {
       }
     }
 
+    // Expand category folders into actual work units so progress tracking is real and accurate
+    interface CleanWorkItem {
+      id: string;
+      path: string;
+      parentDir?: string;
+      isCategoryDirEntry: boolean;
+      isDirectory: boolean;
+      estimatedBytes: number;
+      toRecycleBin: boolean;
+    }
+
+    const workItems: CleanWorkItem[] = [];
+
     for (const item of plan.items) {
-      // Check if protected by backend duplicate preservation rule
+      const isCategoryCleaning = ['user_temp', 'crash_dumps', 'thumb_cache', 'edge_cache', 'chrome_cache'].includes(item.id);
+      if (isCategoryCleaning) {
+        if (!fs.existsSync(item.path)) {
+          workItems.push({
+            id: item.id,
+            path: item.path,
+            isCategoryDirEntry: false,
+            isDirectory: true,
+            estimatedBytes: item.estimatedBytes || 0,
+            toRecycleBin: plan.method === 'recycle_bin',
+          });
+          continue;
+        }
+
+        try {
+          const entries = await fs.promises.readdir(item.path, { withFileTypes: true });
+          const pattern = item.id === 'thumb_cache' ? /^thumbcache_.*\.db$/i : null;
+          let added = 0;
+          for (const entry of entries) {
+            if (pattern && (!entry.isFile() || !pattern.test(entry.name))) {
+              continue;
+            }
+            workItems.push({
+              id: item.id,
+              path: path.join(item.path, entry.name),
+              parentDir: item.path,
+              isCategoryDirEntry: true,
+              isDirectory: entry.isDirectory(),
+              estimatedBytes: 0,
+              toRecycleBin: plan.method === 'recycle_bin',
+            });
+            added++;
+          }
+        } catch (err: any) {
+          workItems.push({
+            id: item.id,
+            path: item.path,
+            isCategoryDirEntry: false,
+            isDirectory: true,
+            estimatedBytes: 0,
+            toRecycleBin: plan.method === 'recycle_bin',
+          });
+        }
+      } else {
+        workItems.push({
+          id: item.id,
+          path: item.path,
+          isCategoryDirEntry: false,
+          isDirectory: false,
+          estimatedBytes: item.estimatedBytes || 0,
+          toRecycleBin: plan.method === 'recycle_bin',
+        });
+      }
+    }
+
+    const totalItems = workItems.length;
+    const totalBytes = plan.totalEstimatedBytes || 0;
+    const startTime = Date.now();
+    let lastReportTime = 0;
+    const REPORT_INTERVAL_MS = 60;
+
+    const reportProgress = (currentItem: string, force = false, status: CleanupProgress['status'] = 'running') => {
+      if (!onProgress) return;
+      const now = Date.now();
+      if (!force && now - lastReportTime < REPORT_INTERVAL_MS) {
+        return;
+      }
+      lastReportTime = now;
+      const elapsedSec = Math.max(0.1, (now - startTime) / 1000);
+      const completed = successCount + failCount + skippedCount;
+      const percent = totalItems > 0 ? Math.min(100, Math.round((completed / totalItems) * 1000) / 10) : 100;
+
+      let estimatedRemainingTime: number | null = null;
+      if (status === 'completed' || completed >= totalItems) {
+        estimatedRemainingTime = 0;
+      } else if (completed >= 2 && elapsedSec >= 0.5) {
+        const itemsPerSec = completed / elapsedSec;
+        const remainingItems = totalItems - completed;
+        if (itemsPerSec > 0) {
+          estimatedRemainingTime = Math.max(0, Math.round(remainingItems / itemsPerSec));
+        }
+      }
+
+      onProgress({
+        totalItems,
+        completedItems: completed,
+        successfulItems: successCount,
+        failedItems: failCount,
+        totalBytes,
+        processedBytes,
+        currentItem,
+        percent,
+        elapsedTime: Math.round(elapsedSec * 10) / 10,
+        estimatedRemainingTime,
+        status,
+      });
+    };
+
+    // Report initial state
+    reportProgress('', true, 'running');
+
+    for (const item of workItems) {
+      // Cancellation check
+      if (this.isCancelled) {
+        skippedCount++;
+        details.push({
+          path: item.path,
+          size: item.estimatedBytes,
+          status: 'skipped',
+          reason: '使用者取消後續清理作業',
+          movedToRecycleBin: false,
+        });
+        reportProgress(item.path, false, 'running');
+        continue;
+      }
+
+      reportProgress(item.path);
+
+      // Check duplicate preservation defense
       if (protectedDuplicateKeepSet.has(item.path)) {
         skippedCount++;
         details.push({
@@ -183,6 +355,7 @@ export class CleanService {
           reason: '後端強制安全防護：同組重複檔案必須保留至少一份完整正本，拒絕全部刪除',
           movedToRecycleBin: false,
         });
+        reportProgress(item.path);
         continue;
       }
 
@@ -197,6 +370,7 @@ export class CleanService {
           reason: safety.reason || '安全規則檢查失敗，已自動略過',
           movedToRecycleBin: false,
         });
+        reportProgress(item.path);
         continue;
       }
 
@@ -210,74 +384,43 @@ export class CleanService {
           reason: '執行前重新驗證發現檔案或目錄已不存在',
           movedToRecycleBin: false,
         });
+        reportProgress(item.path);
         continue;
       }
 
-      // 3. Handle known candidate categories safely
-      const isCategoryCleaning = ['user_temp', 'crash_dumps', 'thumb_cache', 'edge_cache', 'chrome_cache'].includes(item.id);
-
-      if (isCategoryCleaning) {
-        // Special safe handling: clean CONTENTS, keep directory itself!
-        if (item.id === 'thumb_cache') {
-          // Clean ONLY thumbcache_*.db files
-          const subResult = await this.cleanDirectoryPatternFiles(
-            item.path,
-            /^thumbcache_.*\.db$/i,
-            plan.method === 'recycle_bin'
-          );
-          successCount += subResult.successCount;
-          failCount += subResult.failCount;
-          skippedCount += subResult.skippedCount;
-          actualFreedBytes += subResult.actualFreedBytes;
-          details.push(...subResult.details);
-        } else {
-          // Clean contents of the temp/cache directory, preserve the root directory
-          const subResult = await this.cleanDirectoryContents(
-            item.path,
-            plan.method === 'recycle_bin'
-          );
-          successCount += subResult.successCount;
-          failCount += subResult.failCount;
-          skippedCount += subResult.skippedCount;
-          actualFreedBytes += subResult.actualFreedBytes;
-          details.push(...subResult.details);
-        }
-        continue;
-      }
-
-      // 4. Single file execution (e.g. large file, duplicate copy)
-      let stats: fs.Stats;
+      // 3. Stat check
+      let currentSize = item.estimatedBytes;
       try {
-        stats = await fs.promises.stat(item.path);
+        const stats = await fs.promises.stat(item.path);
+        currentSize = stats.size;
+        if (!item.isCategoryDirEntry && !stats.isFile()) {
+          skippedCount++;
+          details.push({
+            path: item.path,
+            size: stats.size,
+            status: 'skipped',
+            reason: '安全保護機制阻止：一般清理項目必須為單一檔案，嚴格禁止將未明確授權之資料夾當成檔案刪除！',
+            movedToRecycleBin: false,
+          });
+          reportProgress(item.path);
+          continue;
+        }
       } catch (err: any) {
         skippedCount++;
         details.push({
           path: item.path,
-          size: item.estimatedBytes,
+          size: currentSize,
           status: 'skipped',
           reason: `無法存取檔案屬性：${err.message || '檔案可能不存在或無存取權限'}`,
           movedToRecycleBin: false,
         });
+        reportProgress(item.path);
         continue;
       }
 
-      // STRICT PROTECTION: Single item cleanup MUST be a regular file, NEVER an arbitrary directory!
-      if (!stats.isFile()) {
-        skippedCount++;
-        details.push({
-          path: item.path,
-          size: stats.size,
-          status: 'skipped',
-          reason: '安全保護機制阻止：一般清理項目必須為單一檔案，嚴格禁止將未明確授權之資料夾當成檔案刪除！',
-          movedToRecycleBin: false,
-        });
-        continue;
-      }
-
-      let currentSize = stats.size;
-
+      // 4. Perform actual deletion
       try {
-        if (plan.method === 'recycle_bin') {
+        if (item.toRecycleBin) {
           await moveToRecycleBin(item.path);
           successCount++;
           actualFreedBytes += currentSize;
@@ -288,8 +431,11 @@ export class CleanService {
             movedToRecycleBin: true,
           });
         } else {
-          // Permanent deletion requested by user for this single file
-          await fs.promises.unlink(item.path);
+          if (item.isDirectory) {
+            await fs.promises.rm(item.path, { recursive: true, force: true });
+          } else {
+            await fs.promises.unlink(item.path);
+          }
           successCount++;
           actualFreedBytes += currentSize;
           details.push({
@@ -305,17 +451,22 @@ export class CleanService {
           path: item.path,
           size: currentSize,
           status: 'failed',
-          reason: err.message || '刪除失敗 (檔案可能正被其他應用程式鎖定)',
+          reason: err.message || '刪除失敗 (檔案可能正被系統或應用程式鎖定)',
           movedToRecycleBin: false,
         });
       }
+
+      processedBytes += currentSize;
+      reportProgress(item.path);
     }
+
+    reportProgress('', true, this.isCancelled ? 'cancelled' : 'completed');
 
     return {
       id: `clean-${Date.now()}`,
       timestamp: new Date().toISOString(),
       operationType: 'safe_cleanup',
-      totalProcessed: plan.items.length,
+      totalProcessed: totalItems,
       successCount,
       failCount,
       skippedCount,

@@ -3,6 +3,7 @@ import type {
   CleanupCandidateItem,
   CleanupExecutionPlan,
   CleanupHistoryRecord,
+  CleanupProgress,
   CleanupResult,
   DevProjectCandidate,
   DirectoryTreeNode,
@@ -31,6 +32,8 @@ const IPC_CHANNELS = {
   DUPLICATE_PROGRESS: 'storage:duplicate-progress',
   SCAN_SAFE_CLEAN: 'storage:scan-safe-clean',
   EXECUTE_CLEANUP: 'storage:execute-cleanup',
+  CANCEL_CLEANUP: 'storage:cancel-cleanup',
+  CLEANUP_PROGRESS: 'storage:cleanup-progress',
   SCAN_DEV_PROJECTS: 'storage:scan-dev-projects',
   CLEAN_DEV_CANDIDATES: 'storage:clean-dev-candidates',
   GET_HISTORY: 'storage:get-history',
@@ -96,6 +99,17 @@ const api: StorageGuardianAPI = {
 
   executeCleanup: (plan: CleanupExecutionPlan) =>
     ipcRenderer.invoke(IPC_CHANNELS.EXECUTE_CLEANUP, plan),
+
+  cancelCleanup: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.CANCEL_CLEANUP),
+
+  onCleanupProgress: (callback: (progress: CleanupProgress) => void) => {
+    const handler = (_event: any, progress: CleanupProgress) => callback(progress);
+    ipcRenderer.on(IPC_CHANNELS.CLEANUP_PROGRESS, handler);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.CLEANUP_PROGRESS, handler);
+    };
+  },
 
   scanDevProjects: (targetRoot: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.SCAN_DEV_PROJECTS, targetRoot),

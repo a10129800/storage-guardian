@@ -1,10 +1,15 @@
 import fs from 'fs';
 import path from 'path';
-import { CleanupResult, DevProjectCandidate } from '../../src/types/index.ts';
+import { CleanupProgress, CleanupResult, DevProjectCandidate } from '../../src/types/index.ts';
 import { validateDevCleanTarget, validateSafePath } from '../../src/utils/security.ts';
 import { moveToRecycleBin } from './recycleBin.ts';
 
 export class DevCleanerService {
+  private isCancelled = false;
+
+  cancel(): void {
+    this.isCancelled = true;
+  }
   /**
    * Scan user-specified workspace or project folder for dependency and build artifact folders.
    */
@@ -108,15 +113,79 @@ export class DevCleanerService {
   /**
    * Safely clean selected developer directories into the Recycle Bin.
    */
-  async cleanCandidates(items: DevProjectCandidate[]): Promise<CleanupResult> {
+  async cleanCandidates(
+    items: DevProjectCandidate[],
+    onProgress?: (progress: CleanupProgress) => void
+  ): Promise<CleanupResult> {
+    this.isCancelled = false;
     const details = [];
     let successCount = 0;
     let failCount = 0;
     let skippedCount = 0;
     let actualFreedBytes = 0;
+    let processedBytes = 0;
 
-    for (const item of items) {
-      if (!item.selected) continue;
+    const selectedItems = items.filter((i) => i.selected);
+    const totalItems = selectedItems.length;
+    const totalBytes = selectedItems.reduce((s, i) => s + i.size, 0);
+    const startTime = Date.now();
+    let lastReportTime = 0;
+    const REPORT_INTERVAL_MS = 60;
+
+    const reportProgress = (currentItem: string, force = false, status: CleanupProgress['status'] = 'running') => {
+      if (!onProgress) return;
+      const now = Date.now();
+      if (!force && now - lastReportTime < REPORT_INTERVAL_MS) {
+        return;
+      }
+      lastReportTime = now;
+      const elapsedSec = Math.max(0.1, (now - startTime) / 1000);
+      const completed = successCount + failCount + skippedCount;
+      const percent = totalItems > 0 ? Math.min(100, Math.round((completed / totalItems) * 1000) / 10) : 100;
+
+      let estimatedRemainingTime: number | null = null;
+      if (status === 'completed' || completed >= totalItems) {
+        estimatedRemainingTime = 0;
+      } else if (completed >= 2 && elapsedSec >= 0.5) {
+        const itemsPerSec = completed / elapsedSec;
+        const remainingItems = totalItems - completed;
+        if (itemsPerSec > 0) {
+          estimatedRemainingTime = Math.max(0, Math.round(remainingItems / itemsPerSec));
+        }
+      }
+
+      onProgress({
+        totalItems,
+        completedItems: completed,
+        successfulItems: successCount,
+        failedItems: failCount,
+        totalBytes,
+        processedBytes,
+        currentItem,
+        percent,
+        elapsedTime: Math.round(elapsedSec * 10) / 10,
+        estimatedRemainingTime,
+        status,
+      });
+    };
+
+    reportProgress('', true, 'running');
+
+    for (const item of selectedItems) {
+      if (this.isCancelled) {
+        skippedCount++;
+        details.push({
+          path: item.targetDir,
+          size: item.size,
+          status: 'skipped' as const,
+          reason: '使用者取消後續清理作業',
+          movedToRecycleBin: false,
+        });
+        reportProgress(item.targetDir, false, 'running');
+        continue;
+      }
+
+      reportProgress(item.targetDir);
 
       const folderName = path.basename(item.targetDir);
       if (!validateDevCleanTarget(folderName)) {
@@ -128,6 +197,7 @@ export class DevCleanerService {
           reason: '目標不屬於安全允許清理的開發目錄類型',
           movedToRecycleBin: false,
         });
+        reportProgress(item.targetDir);
         continue;
       }
 
@@ -143,6 +213,7 @@ export class DevCleanerService {
           reason: '安全保護：目標為專案根目錄，絕對禁止刪除！',
           movedToRecycleBin: false,
         });
+        reportProgress(item.targetDir);
         continue;
       }
 
@@ -156,6 +227,7 @@ export class DevCleanerService {
           reason: safety.reason || '系統保護目錄',
           movedToRecycleBin: false,
         });
+        reportProgress(item.targetDir);
         continue;
       }
 
@@ -168,6 +240,7 @@ export class DevCleanerService {
           reason: '目錄已不存在',
           movedToRecycleBin: false,
         });
+        reportProgress(item.targetDir);
         continue;
       }
 
@@ -191,13 +264,18 @@ export class DevCleanerService {
           movedToRecycleBin: false,
         });
       }
+
+      processedBytes += item.size;
+      reportProgress(item.targetDir);
     }
+
+    reportProgress('', true, this.isCancelled ? 'cancelled' : 'completed');
 
     return {
       id: `devclean-${Date.now()}`,
       timestamp: new Date().toISOString(),
       operationType: 'dev_cleanup',
-      totalProcessed: items.filter((i) => i.selected).length,
+      totalProcessed: totalItems,
       successCount,
       failCount,
       skippedCount,

@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { useAppState } from '../context/AppStateContext.tsx';
 import { api } from '../services/api.ts';
-import { DuplicateGroup, ScanProgress } from '../types/index.ts';
+import { CleanupProgress, CleanupResult, DuplicateGroup, ScanProgress } from '../types/index.ts';
 import { formatBytes, formatDate } from '../utils/formatters.ts';
 import { ConfirmDialog } from '../components/Common/ConfirmDialog.tsx';
+import { CleanupProgressModal } from '../components/Common/CleanupProgressModal.tsx';
 import {
   AlertTriangleIcon,
   CheckCircleIcon,
@@ -29,6 +30,11 @@ export const DuplicateFinderPage: React.FC = () => {
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isProgressModalOpen, setIsProgressModalOpen] = useState(false);
+  const [cleanupProgress, setCleanupProgress] = useState<CleanupProgress | null>(null);
+  const [lastResult, setLastResult] = useState<CleanupResult | null>(null);
+  const [executeError, setExecuteError] = useState<string | null>(null);
+  const [isCancelling, setIsCancelling] = useState(false);
 
   useEffect(() => {
     const unsubscribe = api.onDuplicateProgress((p) => {
@@ -103,7 +109,7 @@ export const DuplicateFinderPage: React.FC = () => {
         const allSelected = updatedFiles.every((f) => f.selectedForDeletion);
         if (allSelected) {
           // Deny selecting all files - keep at least the current one or first one!
-          alert('安全保護規則：每組重複檔案必須至少保留一份完整複本，不可將同組全部複本皆標記刪除！');
+          setErrorMessage('安全保護規則：每組重複檔案必須至少保留一份完整複本，不可將同組全部複本皆標記刪除！');
           return g;
         }
 
@@ -165,18 +171,28 @@ export const DuplicateFinderPage: React.FC = () => {
   const totalTheoretical = groups.reduce((s, g) => s + g.theoreticalReclaimableBytes, 0);
 
   const handleExecuteCleanup = async () => {
-    if (selectedFilesList.length === 0) return;
+    if (selectedFilesList.length === 0 || isExecuting) return;
 
     // STRICT SAFETY CHECK: Ensure every affected group retains at least 1 unselected copy
     for (const g of groups) {
       const selectedInGroup = g.files.filter((f) => f.selectedForDeletion);
       if (selectedInGroup.length > 0 && selectedInGroup.length === g.files.length) {
-        alert('安全保護阻擋：每組重複檔案必須至少保留一份完整複本，絕不允許將整組檔案全數刪除！');
+        setErrorMessage('安全保護阻擋：每組重複檔案必須至少保留一份完整複本，絕不允許將整組檔案全數刪除！');
+        setIsConfirmOpen(false);
         return;
       }
     }
 
+    setIsConfirmOpen(false);
+    setIsProgressModalOpen(true);
     setIsExecuting(true);
+    setExecuteError(null);
+    setCleanupProgress(null);
+
+    const unsubscribe = api.onCleanupProgress((p) => {
+      setCleanupProgress(p);
+    });
+
     try {
       const plan = {
         items: selectedFilesList.map((f) => ({
@@ -191,6 +207,7 @@ export const DuplicateFinderPage: React.FC = () => {
       };
 
       const result = await api.executeCleanup(plan);
+      setLastResult(result);
       setLastCleanupResult(result);
 
       // Remove cleaned files from the current groups
@@ -203,13 +220,29 @@ export const DuplicateFinderPage: React.FC = () => {
           }))
           .filter((g) => g.files.length > 1) // Keep only remaining duplicate sets
       );
-
-      setIsConfirmOpen(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Execution failed:', err);
+      setExecuteError(err?.message || '重複檔案清理作業失敗');
     } finally {
+      unsubscribe();
       setIsExecuting(false);
     }
+  };
+
+  const handleCancelCleanup = async () => {
+    if (isCancelling) return;
+    setIsCancelling(true);
+    try {
+      await api.cancelCleanup();
+    } catch (err) {
+      console.error('Cancel cleanup failed:', err);
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  const handleCloseProgressModal = () => {
+    setIsProgressModalOpen(false);
   };
 
   return (
@@ -358,7 +391,7 @@ export const DuplicateFinderPage: React.FC = () => {
               </div>
               <button
                 className="btn btn-danger"
-                disabled={selectedFilesList.length === 0}
+                disabled={selectedFilesList.length === 0 || isExecuting}
                 onClick={() => setIsConfirmOpen(true)}
               >
                 <TrashIcon size={16} />
@@ -528,6 +561,18 @@ export const DuplicateFinderPage: React.FC = () => {
         onConfirm={handleExecuteCleanup}
         onCancel={() => setIsConfirmOpen(false)}
         isProcessing={isExecuting}
+      />
+
+      {/* Real-time Cleanup Progress & Cancellation Modal */}
+      <CleanupProgressModal
+        isOpen={isProgressModalOpen}
+        progress={cleanupProgress}
+        result={lastResult}
+        error={executeError}
+        isExecuting={isExecuting}
+        isCancelling={isCancelling}
+        onCancel={handleCancelCleanup}
+        onClose={handleCloseProgressModal}
       />
     </div>
   );

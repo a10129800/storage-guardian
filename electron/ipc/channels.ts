@@ -13,6 +13,8 @@ export const IPC_CHANNELS = {
   DUPLICATE_PROGRESS: 'storage:duplicate-progress',
   SCAN_SAFE_CLEAN: 'storage:scan-safe-clean',
   EXECUTE_CLEANUP: 'storage:execute-cleanup',
+  CANCEL_CLEANUP: 'storage:cancel-cleanup',
+  CLEANUP_PROGRESS: 'storage:cleanup-progress',
   SCAN_DEV_PROJECTS: 'storage:scan-dev-projects',
   CLEAN_DEV_CANDIDATES: 'storage:clean-dev-candidates',
   GET_HISTORY: 'storage:get-history',

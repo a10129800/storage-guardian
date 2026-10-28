@@ -1,7 +1,9 @@
-import { shell } from 'electron';
+import * as electronPkg from 'electron';
 import { execFile } from 'child_process';
 import util from 'util';
 import fs from 'fs';
+
+const shell: any = (electronPkg as any)?.shell || (typeof (electronPkg as any)?.default === 'object' ? (electronPkg as any).default?.shell : null);
 
 const execFileAsync = util.promisify(execFile);
 
@@ -17,6 +19,9 @@ export async function moveToRecycleBin(targetPath: string): Promise<boolean> {
       return true;
     } catch (err: any) {
       console.warn(`shell.trashItem failed for ${targetPath}:`, err.message);
+      // STRICT BEHAVIOR: In Electron, do not fall back to PowerShell with modal UI dialogs,
+      // as that would trigger blocking Windows error dialogs. Throw directly so caller handles it safely.
+      throw new Error(`無法將項目移至資源回收筒: ${err.message || '存取被拒或檔案使用中'}`);
     }
   }
 
